@@ -83,14 +83,16 @@ pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: 
     let batch = x.size() / length;
 
     for i in 0..batch {
-        let mut sum_of_x_sq = 0.0f32;
+        // let mut sum_of_x_sq = 0.0f32;
         let left = i * length;
         let x_batch = &x_data[left..left + length];
 
-        for x_value in x_batch.iter() {
-            sum_of_x_sq += x_value * x_value;
-        }
-        let rms = (sum_of_x_sq / (length as f32)).sqrt();
+        // for x_value in x_batch.iter() {
+        //     sum_of_x_sq += x_value * x_value;
+        // }
+        let sum_of_x_sq: f32 = x_batch.iter().map(|&x_value| x_value * x_value).sum();
+
+        let rms = (sum_of_x_sq / (length as f32) + epsilon).sqrt();
         for j in 0..length {
             y_data[left + j] = x_batch[j] * w_data[j] / rms;
         }
@@ -133,23 +135,33 @@ pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor
     assert_eq!(b_row, c_col);
     assert_eq!(a_col, b_col);
 
-    let c_size = c.size();
+    // let c_size = c.size();
     let a_data = a.data();
     let b_data = b.data();
     let c_data = unsafe { c.data_mut() };
 
-    let m = a_row;
-    let n = b_row;
-    let k = a_col;
-    for curr in 0..c_size {
-        c_data[curr] *= beta;
-        let curr_row = curr / n;
-        let curr_col = curr % n;
-        let mut sum = 0.0f32;
-        for index_k in 0..k {
-            sum += a_data[curr_row * k + index_k] * b_data[curr_col * k + index_k];
+    // let m = a_row;
+    // let n = b_row;
+    // let k = a_col;
+    // for curr in 0..c_size {
+    //     c_data[curr] *= beta;
+    //     let curr_row = curr / n;
+    //     let curr_col = curr % n;
+    //     let mut sum = 0.0f32;
+    //     for index_k in 0..k {
+    //         sum += a_data[curr_row * k + index_k] * b_data[curr_col * k + index_k];
+    //     }
+    //     c_data[curr] += alpha * sum;
+    // }
+
+    for i in 0..c_row {
+        for j in 0..c_col {
+            let mut sum = 0.0f32;
+            for k in 0..a_col {
+                sum += a_data[i * a_col + k] * b_data[j * b_col + k];
+            }
+            c_data[i * c_col + j] = beta * c_data[i * c_col + j] + alpha * sum;
         }
-        c_data[curr] += alpha * sum;
     }
 
     // todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");

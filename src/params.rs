@@ -35,67 +35,57 @@ pub struct LLamaParams<T> {
 // }
 
 impl LLamaParams<f32> {
+    // 加载 hugging face 官方的 satetensor 结构, 从其中的 metadata 元信息中得到各矩阵的参数, 初始化本项目自定义的 LLamaParam 结构体
     pub fn from_safetensors(safetensor: &SafeTensors, config: &LlamaConfigJson) -> Self {
-        let get_tensor = |name: &str| -> Tensor<f32> {
-            let tensor_view = safetensor
-                .tensor(name)
-                .expect(&format!("Tensor {} not found", name));
+        let layers = config.num_hidden_layers; // 共 2 层
 
-            // Ensure the tensor is of type f32
-            assert_eq!(
-                tensor_view.dtype(),
-                Dtype::F32,
-                "Expected tensor of type F32"
-            );
+        // 从safetensors文件的模型参数加载
+        // let get_tensor = |name: &str| {
+        //     let tensor_view = safetensor.tensor(name).unwrap(); // 断点可看到 safetensor加载出的内容, data 是数据, metadata是元数据, 我们根据 name 可以先在 metadata.index_map 中找到 metadata.tensors的下标, 再在 metadata.tensors 中找到data[] 中的下标, 最终在 data[] 中按下标找到对应范围的元素
+        //     let mut vec_f32s = vec![];
+        //     for chunk in tensor_view.data().chunks_exact(4) {
+        //         // 因为参数是 float32 的, 1个 float32 占用 4 个 bytes
+        //         // 每次迭代取4个bytes
+        //         let bytes: [u8; 4] = chunk.try_into().unwrap(); // 取4个bytes
+        //         let f = f32::from_le_bytes(bytes); // 把这4个bytes 转为 1个float32
+        //         vec_f32s.push(f);
+        //     }
+        //     Tensor::new(vec_f32s, &tensor_view.shape().to_vec()) // Vec<f32> 转 Tensor<f32>, 其中 Tensor 是本项目自定义的结构, 这样就实现了把 huggingface 通用的 safetensor 文件中的参数, 转换为本项目自定义的 Tensor 结构了
+        // };
 
-            let data_u8 = tensor_view.data();
-            let (prefix, data_f32, suffix) = unsafe { data_u8.align_to::<f32>() };
-            assert!(
-                prefix.is_empty() && suffix.is_empty(),
-                "Data alignment issue"
-            );
+        fn get_tensor(name: &str, safetensor: &SafeTensors) -> Tensor<f32> {
+            let tensor_view = safetensor.tensor(name).unwrap();
+            let vec_f32s = tensor_view
+                .data()
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+                .collect::<Vec<f32>>();
+            Tensor::new(vec_f32s, &tensor_view.shape().to_vec())
+        }
 
-            Tensor::<f32>::new(data_f32.to_vec(), &tensor_view.shape().to_vec())
-        };
-
-        let embedding_table = get_tensor("embedding_table");
-        let lm_head = if config.tie_word_embeddings {
-            embedding_table.clone()
-        } else {
-            get_tensor("lm_head")
-        };
+        fn get_tensor_vec(safetensor: &SafeTensors, layers: usize, name: &str) -> Vec<Tensor<f32>> {
+            (0..layers)
+                .map(|layer_idx| {
+                    let tensor_name = format!("model.layers.{layer_idx}.{name}");
+                    get_tensor(&tensor_name, safetensor)
+                })
+                .collect()
+        }
 
         LLamaParams {
-            embedding_table,
-            rms_att_w: (0..config.num_hidden_layers)
-                .map(|i| get_tensor(&format!("rms_att_w_{}", i)))
-                .collect(),
-            wq: (0..config.num_hidden_layers)
-                .map(|i| get_tensor(&format!("wq_{}", i)))
-                .collect(),
-            wk: (0..config.num_hidden_layers)
-                .map(|i| get_tensor(&format!("wk_{}", i)))
-                .collect(),
-            wv: (0..config.num_hidden_layers)
-                .map(|i| get_tensor(&format!("wv_{}", i)))
-                .collect(),
-            wo: (0..config.num_hidden_layers)
-                .map(|i| get_tensor(&format!("wo_{}", i)))
-                .collect(),
-            rms_ffn_w: (0..config.num_hidden_layers)
-                .map(|i| get_tensor(&format!("rms_ffn_w_{}", i)))
-                .collect(),
-            w_up: (0..config.num_hidden_layers)
-                .map(|i| get_tensor(&format!("w_up_{}", i)))
-                .collect(),
-            w_gate: (0..config.num_hidden_layers)
-                .map(|i| get_tensor(&format!("w_gate_{}", i)))
-                .collect(),
-            w_down: (0..config.num_hidden_layers)
-                .map(|i| get_tensor(&format!("w_down_{}", i)))
-                .collect(),
-            rms_out_w: get_tensor("rms_out_w"),
-            lm_head,
+            embedding_table: get_tensor("lm_head.weight", safetensor), // (vocab_size, dim)
+            rms_out_w: get_tensor("model.norm.weight", safetensor),    // (hidden_size,)
+            lm_head: get_tensor("lm_head.weight", safetensor),         // (vocab_size, dim)
+
+            rms_att_w: get_tensor_vec(safetensor, layers, "input_layernorm.weight"),
+            rms_ffn_w: get_tensor_vec(safetensor, layers, "post_attention_layernorm.weight"),
+            wq: get_tensor_vec(safetensor, layers, "self_attn.q_proj.weight"),
+            wk: get_tensor_vec(safetensor, layers, "self_attn.k_proj.weight"),
+            wv: get_tensor_vec(safetensor, layers, "self_attn.v_proj.weight"),
+            wo: get_tensor_vec(safetensor, layers, "self_attn.o_proj.weight"),
+            w_up: get_tensor_vec(safetensor, layers, "mlp.up_proj.weight"),
+            w_gate: get_tensor_vec(safetensor, layers, "mlp.gate_proj.weight"),
+            w_down: get_tensor_vec(safetensor, layers, "mlp.down_proj.weight"),
         }
     }
 }

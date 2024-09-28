@@ -153,7 +153,89 @@ fn self_attention(
     total_seq_len: usize,
     dqkv: usize,
 ) {
-    todo!("Implement self_attention");
+    let unit_len = dqkv;
+    let q_row_len = n_kv_h * n_groups * unit_len;
+    let k_row_len = n_kv_h * unit_len;
+
+    let q_data = q.data();
+    let k_data = k.data();
+    let v_data = v.data();
+    let hidden_states_data = unsafe { hidden_states.data_mut() };
+
+    // 1. Calculate attention scores: Q @ K^T
+    for m in 0..seq_len {
+        for n in 0..total_seq_len {
+            for i in 0..n_kv_h {
+                let q_offset = m * q_row_len + i * n_groups * unit_len;
+                let k_offset = n * k_row_len + i * unit_len;
+
+                for j in 0..n_groups {
+                    let q_slice = &q_data[q_offset + j * unit_len..q_offset + (j + 1) * unit_len];
+                    let k_slice = &k_data[k_offset..k_offset + unit_len];
+
+                    // Calculate dot product between q_slice and k_slice
+                    let score = q_slice
+                        .iter()
+                        .zip(k_slice)
+                        .map(|(&q, &k)| q * k)
+                        .sum::<f32>()
+                        / (unit_len as f32).sqrt();
+
+                    let attn_offset = (i * n_groups + j) * seq_len * total_seq_len;
+                    unsafe {
+                        att_scores.data_mut()[attn_offset + m * total_seq_len + n] = score;
+                    }
+
+                    // Print the attention score for this pair
+                    // println!(
+                    //     "Attention Score [m: {}, n: {}, head: {}, group: {}] = {}",
+                    //     m, n, i, j, score
+                    // );
+                }
+            }
+        }
+    }
+
+    // 2. Apply softmax to attention scores
+    OP::masked_softmax(att_scores);
+
+    // Print attention scores after softmax
+    // println!("Attention Scores after Softmax: {:?}", att_scores.data());
+
+    // 3. Calculate attention output: attn @ V
+    let att_scores_data = att_scores.data(); // Now access att_scores data mutably after the softmax
+
+    let v_row_len = n_kv_h * unit_len;
+    let hidden_row_len = n_kv_h * n_groups * unit_len;
+
+    for m in 0..seq_len {
+        for i in 0..n_kv_h {
+            let v_start = i * unit_len;
+
+            for j in 0..n_groups {
+                let attn_offset = (i * n_groups + j) * seq_len * total_seq_len;
+                let hidden_offset = m * hidden_row_len + i * n_groups * unit_len + j * unit_len;
+
+                for n in 0..unit_len {
+                    let mut sum = 0.0;
+                    for k in 0..total_seq_len {
+                        let score = att_scores_data[attn_offset + m * total_seq_len + k];
+                        sum += score * v_data[v_start + k * v_row_len + n];
+                    }
+                    hidden_states_data[hidden_offset + n] = sum;
+
+                    // Print the hidden state update for this value
+                    // println!(
+                    //     "Hidden State [m: {}, head: {}, group: {}, unit: {}] = {}",
+                    //     m, i, j, n, hidden_states_data[hidden_offset + n]
+                    // );
+                }
+            }
+        }
+    }
+
+    // Print final hidden states
+    // println!("Final Hidden States: {:?}", hidden_states.data());
 }
 
 fn mlp(
@@ -279,4 +361,77 @@ pub fn test_load_safetensors() {
         1e-6
     ));
     assert!(float_eq(&model.params.wo[0].data()[100], &0.01965332, 1e-6));
+}
+
+#[test]
+fn test_self_attention() {
+    let seq_len = 2;
+    let total_seq_len = 4;
+    let n_kv_h = 2;
+    let n_groups = 1;
+    let dqkv = 3;
+
+    // Initialize simple test tensors for Q, K, and V
+    let q_data = vec![
+        0.1, 0.2, 0.3, // Q for seq_idx 0, head 0
+        0.4, 0.5, 0.6, // Q for seq_idx 1, head 0
+        0.7, 0.8, 0.9, // Q for seq_idx 0, head 1
+        1.0, 1.1, 1.2, // Q for seq_idx 1, head 1
+    ];
+    let q = Tensor::<f32>::new(q_data, &vec![seq_len, n_kv_h * n_groups * dqkv]);
+
+    let k_data = vec![
+        0.1, 0.2, 0.3, // K for total_seq_idx 0, head 0
+        0.4, 0.5, 0.6, // K for total_seq_idx 1, head 0
+        0.7, 0.8, 0.9, // K for total_seq_idx 2, head 0
+        1.0, 1.1, 1.2, // K for total_seq_idx 3, head 0
+        1.3, 1.4, 1.5, // K for total_seq_idx 0, head 1
+        1.6, 1.7, 1.8, // K for total_seq_idx 1, head 1
+        1.9, 2.0, 2.1, // K for total_seq_idx 2, head 1
+        2.2, 2.3, 2.4, // K for total_seq_idx 3, head 1
+    ];
+    let k = Tensor::<f32>::new(k_data, &vec![total_seq_len, n_kv_h * dqkv]);
+
+    let v_data = vec![
+        0.1, 0.2, 0.3, // V for total_seq_idx 0, head 0
+        0.4, 0.5, 0.6, // V for total_seq_idx 1, head 0
+        0.7, 0.8, 0.9, // V for total_seq_idx 2, head 0
+        1.0, 1.1, 1.2, // V for total_seq_idx 3, head 0
+        1.3, 1.4, 1.5, // V for total_seq_idx 0, head 1
+        1.6, 1.7, 1.8, // V for total_seq_idx 1, head 1
+        1.9, 2.0, 2.1, // V for total_seq_idx 2, head 1
+        2.2, 2.3, 2.4, // V for total_seq_idx 3, head 1
+    ];
+    let v = Tensor::<f32>::new(v_data, &vec![total_seq_len, n_kv_h * dqkv]);
+
+    // Initialize attention score tensor and hidden_states
+    let mut att_scores = Tensor::<f32>::default(&vec![n_kv_h, n_groups, seq_len, total_seq_len]);
+    let mut hidden_states = Tensor::<f32>::default(&vec![seq_len, n_kv_h * n_groups * dqkv]);
+
+    // Run self_attention
+    self_attention(
+        &mut hidden_states,
+        &mut att_scores,
+        &q,
+        &k,
+        &v,
+        n_kv_h,
+        n_groups,
+        seq_len,
+        total_seq_len,
+        dqkv,
+    );
+
+    // Check the results (example expected results, calculated manually)
+    let expected_hidden_states = Tensor::<f32>::new(
+        vec![
+            0.7825454, 0.8825454, 0.9825454, // Output for seq_idx 0, head 0
+            1.1990090, 1.2990088, 1.3990089, // Output for seq_idx 0, head 1
+            1.5267198, 1.6267197, 1.7267196, // Output for seq_idx 1, head 0
+            1.9442390, 2.0442388, 2.1442390, // Output for seq_idx 1, head 1
+        ],
+        &vec![seq_len, n_kv_h * n_groups * dqkv],
+    );
+
+    assert!(hidden_states.close_to(&expected_hidden_states, 1e-3));
 }
