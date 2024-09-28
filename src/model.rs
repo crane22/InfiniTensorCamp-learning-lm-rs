@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::path::Path;
 use std::vec;
 
 use crate::config::LlamaConfigJson;
@@ -7,24 +8,40 @@ use crate::operators::{self as OP, matmul_transb, rms_norm, silu};
 use crate::params::LLamaParams;
 use crate::tensor::Tensor;
 use safetensors::SafeTensors;
-use std::path::Path;
+
+/// Llama Model structure for text generation
+/// # Parameters:
+/// - `vocab`: Vocabulary size.
+/// - `n_layers`: Number of layers in the transformer.
+/// - `n_q_h`: Number of attention heads for queries.
+/// - `n_kv_h`: Number of attention heads for keys and values.
+/// - `d`: Dimension of hidden states.
+/// - `dqkv`: Dimension of a single Q, K, or V vector.
+/// - `di`: Dimension of intermediate states.
+/// - `eps`: Epsilon value for RMS normalization.
+/// - `rope_theta`: Scaling factor for rotary positional embeddings.
+/// - `max_seq_len`: Maximum sequence length.
+/// - `params`: The model parameters including weights and embeddings.
+/// - `bos_token_id`: Token ID for the beginning of a sentence.
+/// - `eos_token_id`: Token ID for the end of a sentence.
 pub struct Llama<T> {
-    vocab: usize,           // vocab size
-    n_layers: usize,        // number of layers
-    n_q_h: usize,           // number of heads for q
-    n_kv_h: usize,          // number of heads for k and v
-    d: usize,               // dimension of hidden states
-    dqkv: usize,            // length of a single q, k, or v vector
-    di: usize,              // dimension of intermediate states
-    eps: f32,               // epsilon for RMS normalization
-    rope_theta: f32,        // rope theta for rope initialization
-    max_seq_len: usize,     // maximum sequence length
-    params: LLamaParams<T>, // trained weights of this model
-    bos_token_id: u32,      // start token id
-    eos_token_id: u32,      // end token id
+    vocab: usize,
+    n_layers: usize,
+    n_q_h: usize,
+    n_kv_h: usize,
+    d: usize,
+    dqkv: usize,
+    di: usize,
+    eps: f32,
+    rope_theta: f32,
+    max_seq_len: usize,
+    params: LLamaParams<T>,
+    bos_token_id: u32,
+    eos_token_id: u32,
 }
 
 impl Llama<f32> {
+    /// Load a Llama model from a safetensor file
     pub fn from_safetensors(model_dir: impl AsRef<Path>) -> Self {
         let config = File::open(model_dir.as_ref().join("config.json")).unwrap();
         let config: LlamaConfigJson = serde_json::from_reader(config).unwrap();
@@ -49,18 +66,25 @@ impl Llama<f32> {
         }
     }
 
+    /// Initialize a new KV cache for attention layers
     pub fn new_cache(&self) -> KVCache<f32> {
         KVCache::new(self.n_layers, self.max_seq_len, self.n_kv_h * self.dqkv, 0)
     }
 
+    /// Forward pass through the model to compute logits
+    /// # Parameters:
+    /// - `input`: Input tensor of token IDs.
+    /// - `cache`: KV cache for storing intermediate attention results.
+    /// # Returns:
+    /// - A tensor of logits for the next token prediction.
     pub fn forward(&self, input: &Tensor<u32>, cache: &mut KVCache<f32>) -> Tensor<f32> {
         let seq_len = input.size();
         let past_seq_len = cache.len();
-        cache.increment(seq_len);
+        cache.increment(seq_len); // Extend cache for the current sequence
         let total_seq_len = past_seq_len + seq_len;
-        let n_groups = self.n_q_h / self.n_kv_h;
+        let n_groups = self.n_q_h / self.n_kv_h; // Compute number of groups for multi-head attention
 
-        // Some pre-allocated buffers that will be reused
+        // Pre-allocate buffers
         let mut residual = Tensor::<f32>::default(&vec![seq_len, self.d]);
         let mut hidden_states = Tensor::<f32>::default(&vec![seq_len, self.d]);
         let mut q_buf = Tensor::<f32>::default(&vec![seq_len, self.n_q_h * self.dqkv]);
@@ -69,11 +93,12 @@ impl Llama<f32> {
         let mut gate_buf = Tensor::<f32>::default(&vec![seq_len, self.di]);
         let mut up_buf = Tensor::<f32>::default(&vec![seq_len, self.di]);
 
-        // Computation Starts Here
         // Embedding lookup
         OP::gather(&mut residual, input, &self.params.embedding_table);
 
+        // Process each transformer layer
         for layer in 0..self.n_layers {
+            // Apply RMSNorm to residual
             OP::rms_norm(
                 &mut hidden_states,
                 &residual,
@@ -81,12 +106,17 @@ impl Llama<f32> {
                 self.eps,
             );
 
-            let q = (&mut q_buf).reshape(&vec![seq_len, self.n_q_h * self.dqkv]); // (seq, n_h * dqkv)
-            let k = &mut cache.k_cache(layer, past_seq_len); // (seq, n_kv_h * dqkv)
-            let v = &mut cache.v_cache(layer, past_seq_len); // (seq, n_kv_h * dqkv)
+            // Prepare Q, K, V buffers
+            let q = (&mut q_buf).reshape(&vec![seq_len, self.n_q_h * self.dqkv]);
+            let k = &mut cache.k_cache(layer, past_seq_len); // Retrieve keys from cache
+            let v = &mut cache.v_cache(layer, past_seq_len); // Retrieve values from cache
+
+            // Linear projection for Q, K, V
             OP::matmul_transb(q, 0., &hidden_states, &self.params.wq[layer], 1.0);
             OP::matmul_transb(k, 0., &hidden_states, &self.params.wk[layer], 1.0);
             OP::matmul_transb(v, 0., &hidden_states, &self.params.wv[layer], 1.0);
+
+            // Apply RoPE (rotary positional embeddings)
             OP::rope(
                 q.reshape(&vec![seq_len, self.n_q_h, self.dqkv]),
                 past_seq_len,
@@ -98,21 +128,48 @@ impl Llama<f32> {
                 self.rope_theta,
             );
 
-            let full_k = &mut cache.k_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
-            let full_v = &mut cache.v_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
+            // Perform self-attention
+            let full_k = &mut cache.k_cache(layer, 0); // Full keys
+            let full_v = &mut cache.v_cache(layer, 0); // Full values
+            self_attention(
+                &mut hidden_states,
+                &mut att_scores,
+                q,
+                full_k,
+                full_v,
+                self.n_kv_h,
+                n_groups,
+                seq_len,
+                total_seq_len,
+                self.dqkv,
+            );
 
-            todo!("self_attention(...)");
-            todo!("down_proj matmul and add residual");
+            // Output projection
+            OP::matmul_transb(
+                &mut residual,
+                1.0,
+                &hidden_states,
+                &self.params.wo[layer],
+                1.0,
+            );
 
-            todo!("mlp(...)");
+            // Apply feed-forward network (MLP)
+            mlp(
+                &mut residual,
+                &mut hidden_states,
+                &mut gate_buf,
+                &mut up_buf,
+                &self.params.w_up[layer],
+                &self.params.w_down[layer],
+                &self.params.w_gate[layer],
+                &self.params.rms_ffn_w[layer],
+                self.eps,
+            );
         }
 
-        // No matter what seq_len, the output is always a 1D vector of length vocab,
-        // which contains the probabilities for the next token.
-        let mut logits = Tensor::<f32>::default(&vec![1, self.vocab]);
+        // Apply final RMSNorm and output projection
         let mut hidden_states = hidden_states.slice((seq_len - 1) * self.d, &vec![1, self.d]);
-        let residual = residual.slice((seq_len - 1) * self.d, &vec![self.d]);
-
+        let residual = residual.slice((seq_len - 1) * self.d, &vec![1, self.d]);
         OP::rms_norm(
             &mut hidden_states,
             &residual,
@@ -120,11 +177,21 @@ impl Llama<f32> {
             self.eps,
         );
 
+        let mut logits = Tensor::<f32>::default(&vec![1, self.vocab]);
         OP::matmul_transb(&mut logits, 0., &hidden_states, &self.params.lm_head, 1.0);
 
-        logits
+        logits // Return logits for the next token prediction
     }
 
+    /// Generate a sequence of tokens using the model
+    /// # Parameters:
+    /// - `token_ids`: Initial sequence of token IDs.
+    /// - `max_len`: Maximum number of tokens to generate.
+    /// - `top_p`: Top-p sampling probability threshold.
+    /// - `top_k`: Top-k sampling threshold.
+    /// - `temperature`: Temperature for controlling randomness.
+    /// # Returns:
+    /// - A vector of generated token IDs.
     pub fn generate(
         &self,
         token_ids: &[u32],
@@ -133,20 +200,42 @@ impl Llama<f32> {
         top_k: u32,
         temperature: f32,
     ) -> Vec<u32> {
-        let mut result = Vec::<u32>::new();
+        let mut result = token_ids.to_vec();
+        let mut cache = self.new_cache();
+        let mut input_tensor = Tensor::<u32>::new(result.clone(), &vec![result.len()]);
 
-        todo!("实现文本生成");
+        while result.len() < max_len {
+            let logits = self.forward(&input_tensor, &mut cache);
+            let next_token = OP::random_sample(&logits, top_p, top_k, temperature);
+            result.push(next_token);
+            if next_token == self.eos_token_id {
+                break;
+            }
+            input_tensor = Tensor::<u32>::new(vec![next_token], &vec![1]);
+        }
 
         result
     }
 }
 
+/// Perform self-attention computation
+/// # Parameters:
+/// - `hidden_states`: Output tensor for the hidden states.
+/// - `att_scores`: Tensor for storing attention scores.
+/// - `q`: Query tensor.
+/// - `k`: Key tensor.
+/// - `v`: Value tensor.
+/// - `n_kv_h`: Number of key-value heads.
+/// - `n_groups`: Number of attention groups.
+/// - `seq_len`: Sequence length.
+/// - `total_seq_len`: Total sequence length (including past and current tokens).
+/// - `dqkv`: Dimension of a single Q, K, or V vector.
 fn self_attention(
-    hidden_states: &mut Tensor<f32>, // (seq, n_kv_h * n_groups * dqkv)
-    att_scores: &mut Tensor<f32>,    // (n_kv_h, n_groups, seq, total_seq)
-    q: &Tensor<f32>,                 // (seq, n_kv_h * n_groups * dqkv)
-    k: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
-    v: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
+    hidden_states: &mut Tensor<f32>,
+    att_scores: &mut Tensor<f32>,
+    q: &Tensor<f32>,
+    k: &Tensor<f32>,
+    v: &Tensor<f32>,
     n_kv_h: usize,
     n_groups: usize,
     seq_len: usize,
@@ -162,7 +251,7 @@ fn self_attention(
     let v_data = v.data();
     let hidden_states_data = unsafe { hidden_states.data_mut() };
 
-    // 1. Calculate attention scores: Q @ K^T
+    // Calculate attention scores (Q @ K^T)
     for m in 0..seq_len {
         for n in 0..total_seq_len {
             for i in 0..n_kv_h {
@@ -173,7 +262,7 @@ fn self_attention(
                     let q_slice = &q_data[q_offset + j * unit_len..q_offset + (j + 1) * unit_len];
                     let k_slice = &k_data[k_offset..k_offset + unit_len];
 
-                    // Calculate dot product between q_slice and k_slice
+                    // Compute dot product between q_slice and k_slice
                     let score = q_slice
                         .iter()
                         .zip(k_slice)
@@ -185,26 +274,16 @@ fn self_attention(
                     unsafe {
                         att_scores.data_mut()[attn_offset + m * total_seq_len + n] = score;
                     }
-
-                    // Print the attention score for this pair
-                    // println!(
-                    //     "Attention Score [m: {}, n: {}, head: {}, group: {}] = {}",
-                    //     m, n, i, j, score
-                    // );
                 }
             }
         }
     }
 
-    // 2. Apply softmax to attention scores
+    // Apply softmax to attention scores
     OP::masked_softmax(att_scores);
 
-    // Print attention scores after softmax
-    // println!("Attention Scores after Softmax: {:?}", att_scores.data());
-
-    // 3. Calculate attention output: attn @ V
-    let att_scores_data = att_scores.data(); // Now access att_scores data mutably after the softmax
-
+    // Calculate attention output (attn @ V)
+    let att_scores_data = att_scores.data();
     let v_row_len = n_kv_h * unit_len;
     let hidden_row_len = n_kv_h * n_groups * unit_len;
 
@@ -223,21 +302,23 @@ fn self_attention(
                         sum += score * v_data[v_start + k * v_row_len + n];
                     }
                     hidden_states_data[hidden_offset + n] = sum;
-
-                    // Print the hidden state update for this value
-                    // println!(
-                    //     "Hidden State [m: {}, head: {}, group: {}, unit: {}] = {}",
-                    //     m, i, j, n, hidden_states_data[hidden_offset + n]
-                    // );
                 }
             }
         }
     }
-
-    // Print final hidden states
-    // println!("Final Hidden States: {:?}", hidden_states.data());
 }
 
+/// Feed-forward network (MLP) layer
+/// # Parameters:
+/// - `residual`: Residual connection tensor.
+/// - `hidden_states`: Hidden states output tensor.
+/// - `gate`: Gate tensor.
+/// - `up`: Up tensor for feed-forward network.
+/// - `w_up`: Weight tensor for up projection.
+/// - `w_down`: Weight tensor for down projection.
+/// - `w_gate`: Weight tensor for gate projection.
+/// - `rms_w`: Weight tensor for RMS normalization.
+/// - `eps`: Epsilon for RMS normalization.
 fn mlp(
     residual: &mut Tensor<f32>,
     hidden_states: &mut Tensor<f32>,
@@ -434,4 +515,151 @@ fn test_self_attention() {
     );
 
     assert!(hidden_states.close_to(&expected_hidden_states, 1e-3));
+}
+
+#[test]
+fn test_forward() {
+    // Define a small dummy model configuration
+    let vocab_size = 10;
+    let num_hidden_layers = 2;
+    let num_attention_heads = 4;
+    let num_key_value_heads = 4;
+    let hidden_size = 8;
+    let intermediate_size = 16;
+    let rms_norm_eps = 1e-6;
+    let rope_theta = 10000.0;
+    let max_position_embeddings = 4;
+    let params = LLamaParams {
+        embedding_table: Tensor::<f32>::new(
+            vec![0.1; vocab_size * hidden_size],
+            &vec![vocab_size, hidden_size],
+        ),
+        rms_att_w: vec![
+            Tensor::<f32>::new(vec![0.1; hidden_size], &vec![hidden_size]);
+            num_hidden_layers
+        ],
+        wq: vec![
+            Tensor::<f32>::new(
+                vec![0.1; hidden_size * hidden_size],
+                &vec![hidden_size, hidden_size]
+            );
+            num_hidden_layers
+        ],
+        wk: vec![
+            Tensor::<f32>::new(
+                vec![0.1; hidden_size * hidden_size],
+                &vec![hidden_size, hidden_size]
+            );
+            num_hidden_layers
+        ],
+        wv: vec![
+            Tensor::<f32>::new(
+                vec![0.1; hidden_size * hidden_size],
+                &vec![hidden_size, hidden_size]
+            );
+            num_hidden_layers
+        ],
+        wo: vec![
+            Tensor::<f32>::new(
+                vec![0.1; hidden_size * hidden_size],
+                &vec![hidden_size, hidden_size]
+            );
+            num_hidden_layers
+        ],
+        w_up: vec![
+            Tensor::<f32>::new(
+                vec![0.1; intermediate_size * hidden_size],
+                &vec![intermediate_size, hidden_size]
+            );
+            num_hidden_layers
+        ],
+        w_down: vec![
+            Tensor::<f32>::new(
+                vec![0.1; hidden_size * intermediate_size],
+                &vec![hidden_size, intermediate_size]
+            );
+            num_hidden_layers
+        ],
+        w_gate: vec![
+            Tensor::<f32>::new(
+                vec![0.1; intermediate_size * hidden_size],
+                &vec![intermediate_size, hidden_size]
+            );
+            num_hidden_layers
+        ],
+        rms_ffn_w: vec![
+            Tensor::<f32>::new(vec![0.1; hidden_size], &vec![hidden_size]);
+            num_hidden_layers
+        ],
+        rms_out_w: Tensor::<f32>::new(vec![0.1; hidden_size], &vec![hidden_size]),
+        lm_head: Tensor::<f32>::new(
+            vec![0.1; vocab_size * hidden_size],
+            &vec![vocab_size, hidden_size],
+        ),
+    };
+    let bos_token_id = 1;
+    let eos_token_id = 2;
+
+    // Define the test model with the parameters
+    let model = Llama {
+        vocab: vocab_size,
+        n_layers: num_hidden_layers,
+        n_q_h: num_attention_heads,
+        n_kv_h: num_key_value_heads,
+        d: hidden_size,
+        dqkv: hidden_size / num_attention_heads,
+        di: intermediate_size,
+        eps: rms_norm_eps,
+        rope_theta: rope_theta,
+        max_seq_len: max_position_embeddings,
+        params: params,
+        bos_token_id: bos_token_id,
+        eos_token_id: eos_token_id,
+    };
+
+    // Create dummy input and cache for testing
+    let input = Tensor::<u32>::new(vec![1, 2, 3], &vec![3]); // A simple input sequence [1, 2, 3]
+    let mut cache = KVCache::<f32>::new(
+        num_hidden_layers,
+        max_position_embeddings,
+        num_key_value_heads * (hidden_size / num_key_value_heads),
+        0,
+    );
+
+    // Call forward function
+    let output = model.forward(&input, &mut cache);
+
+    // Print output for manual inspection
+    println!("Output: {:?}", output.data());
+
+    // Basic checks to ensure the output is the correct shape and type
+    assert_eq!(
+        output.shape(),
+        &vec![1, vocab_size],
+        "Output shape should match [1, vocab_size]"
+    );
+}
+
+#[test]
+fn test_generate() {
+    use std::path::PathBuf;
+    let model_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("models")
+        .join("story");
+    let model = Llama::from_safetensors(&model_dir);
+    // 输入的 token 序列
+    let token_ids = vec![0, 123, 456]; // 一些初始的token序列
+
+    // 调用 generate 函数进行文本生成
+    let generated_tokens = model.generate(&token_ids, 50, 0.9, 50, 1.0);
+
+    // 打印生成的 token 序列
+    println!("Generated Tokens: {:?}", generated_tokens);
+
+    // 可添加一些简单的断言进行检查
+    assert!(generated_tokens.len() <= 50, "生成的token数不应超过max_len");
+    assert!(
+        generated_tokens.contains(&model.eos_token_id),
+        "生成结果应包含EOS token"
+    );
 }
