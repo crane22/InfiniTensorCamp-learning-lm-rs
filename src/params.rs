@@ -1,4 +1,5 @@
 use crate::config::LlamaConfigJson;
+use crate::float::FloatLike;
 use crate::tensor::Tensor;
 use safetensors::{Dtype, SafeTensors};
 
@@ -18,10 +19,9 @@ pub struct LLamaParams<T> {
     pub rms_out_w: Tensor<T>,   // (hidden_size,) - Final layer RMS normalization weights
     pub lm_head: Tensor<T>,     // (vocab_size, dim) - Final projection to vocabulary (output layer)
 }
-
-impl LLamaParams<f32> {
+impl<T: FloatLike + Copy + Default> LLamaParams<T> {
     /// Loads the parameters of the LLaMA model from a SafeTensors file.
-    /// Converts the SafeTensor data into `Tensor<f32>` format and initializes the `LLamaParams` struct.
+    /// Converts the SafeTensor data into `Tensor<T>` format and initializes the `LLamaParams` struct.
     ///
     /// # Parameters:
     /// - `safetensor`: A SafeTensors instance that holds the model's weights.
@@ -33,22 +33,39 @@ impl LLamaParams<f32> {
         let layers = config.num_hidden_layers; // Number of transformer layers in the model
 
         /// Helper function to extract a tensor from the SafeTensors object using a given name.
-        /// Converts the raw data into `Tensor<f32>` format.
+        /// Converts the raw data into `Tensor<T>` format based on the tensor's dtype.
         ///
         /// # Parameters:
         /// - `name`: The name of the tensor in the SafeTensors file.
         /// - `safetensor`: The SafeTensors object containing the data.
         ///
         /// # Returns:
-        /// - A tensor of type `Tensor<f32>`.
-        fn get_tensor(name: &str, safetensor: &SafeTensors) -> Tensor<f32> {
+        /// - A tensor of type `Tensor<T>`.
+        fn get_tensor<T: FloatLike + Copy>(name: &str, safetensor: &SafeTensors) -> Tensor<T> {
             let tensor_view = safetensor.tensor(name).unwrap();
-            let vec_f32s = tensor_view
-                .data()
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())) // Converts 4-byte chunks into f32
-                .collect::<Vec<f32>>();
-            Tensor::new(vec_f32s, &tensor_view.shape().to_vec()) // Create a `Tensor<f32>` from raw data
+            let dtype = tensor_view.dtype();
+
+            match dtype {
+                Dtype::F32 => {
+                    let vec_f32s = tensor_view
+                        .data()
+                        .chunks_exact(4)
+                        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+                        .map(T::from_f32) // Convert `f32` to generic `T`
+                        .collect::<Vec<T>>();
+                    Tensor::new(vec_f32s, &tensor_view.shape().to_vec())
+                }
+                Dtype::F16 => {
+                    let vec_f16s = tensor_view
+                        .data()
+                        .chunks_exact(2)
+                        .map(|chunk| half::f16::from_le_bytes([chunk[0], chunk[1]]))
+                        .map(|f16| T::from_f32(f16.to_f32())) // Convert `f16` to `T`
+                        .collect::<Vec<T>>();
+                    Tensor::new(vec_f16s, &tensor_view.shape().to_vec())
+                }
+                _ => panic!("Unsupported dtype in SafeTensors: {:?}", dtype),
+            }
         }
 
         /// Helper function to extract tensors for each layer from the SafeTensors object.
@@ -61,7 +78,11 @@ impl LLamaParams<f32> {
         ///
         /// # Returns:
         /// - A vector of tensors, one for each layer.
-        fn get_tensor_vec(safetensor: &SafeTensors, layers: usize, name: &str) -> Vec<Tensor<f32>> {
+        fn get_tensor_vec<T: FloatLike + Copy>(
+            safetensor: &SafeTensors,
+            layers: usize,
+            name: &str,
+        ) -> Vec<Tensor<T>> {
             (0..layers)
                 .map(|layer_idx| {
                     let tensor_name = format!("model.layers.{layer_idx}.{name}");

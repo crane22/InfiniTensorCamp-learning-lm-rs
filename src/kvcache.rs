@@ -1,11 +1,11 @@
-use std::vec;
-
+use crate::float::FloatLike;
 use crate::tensor::Tensor;
+use std::vec;
 
 /// KVCache holds the key-value cache for each layer during model inference.
 /// This structure is designed to store the past key-value pairs to efficiently
 /// handle attention mechanisms during generation or inference.
-pub struct KVCache<T> {
+pub struct KVCache<T: FloatLike> {
     k_cache: Vec<Tensor<T>>, // Key cache (max_seq_len, n_kv_head * dqkv) per layer.
     v_cache: Vec<Tensor<T>>, // Value cache (max_seq_len, n_kv_head * dqkv) per layer.
     max_seq_len: usize,      // Maximum sequence length the cache can store.
@@ -13,7 +13,7 @@ pub struct KVCache<T> {
     length: usize,           // Current length of the stored sequence in the cache.
 }
 
-impl<T: Default + Copy> KVCache<T> {
+impl<T: FloatLike + Default + Copy> KVCache<T> {
     /// Creates a new KVCache for a given number of layers, max sequence length,
     /// and dimension size. Initializes key and value caches for all layers.
     ///
@@ -48,6 +48,7 @@ impl<T: Default + Copy> KVCache<T> {
     /// # Returns:
     /// - A tensor slice from the key cache for the given layer.
     pub fn k_cache(&mut self, layer: usize, start: usize) -> Tensor<T> {
+        assert!(start < self.length, "Start index out of bounds");
         self.k_cache[layer].slice(start * self.dim, &vec![self.length - start, self.dim])
     }
 
@@ -61,6 +62,7 @@ impl<T: Default + Copy> KVCache<T> {
     /// # Returns:
     /// - A tensor slice from the value cache for the given layer.
     pub fn v_cache(&mut self, layer: usize, start: usize) -> Tensor<T> {
+        assert!(start < self.length, "Start index out of bounds");
         self.v_cache[layer].slice(start * self.dim, &vec![self.length - start, self.dim])
     }
 
@@ -70,6 +72,10 @@ impl<T: Default + Copy> KVCache<T> {
     /// # Parameters:
     /// - `seq_len`: Number of tokens to add to the sequence.
     pub fn increment(&mut self, seq_len: usize) {
+        assert!(
+            self.length + seq_len <= self.max_seq_len,
+            "Sequence length exceeds maximum cache size"
+        );
         self.length += seq_len;
     }
 
@@ -79,5 +85,40 @@ impl<T: Default + Copy> KVCache<T> {
     /// - The number of tokens stored in the cache.
     pub fn len(&self) -> usize {
         self.length
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::float::FloatLike;
+    use half::f16;
+
+    #[test]
+    fn test_kv_cache_f32() {
+        let mut kv_cache = KVCache::<f32>::new(2, 10, 4, 0);
+
+        kv_cache.increment(5);
+        assert_eq!(kv_cache.len(), 5);
+
+        let k_slice = kv_cache.k_cache(0, 2);
+        let v_slice = kv_cache.v_cache(0, 2);
+
+        assert_eq!(k_slice.shape(), &vec![3, 4]); // Expect 3 entries remaining after index 2
+        assert_eq!(v_slice.shape(), &vec![3, 4]);
+    }
+
+    #[test]
+    fn test_kv_cache_f16() {
+        let mut kv_cache = KVCache::<f16>::new(2, 10, 4, 0);
+
+        kv_cache.increment(5);
+        assert_eq!(kv_cache.len(), 5);
+
+        let k_slice = kv_cache.k_cache(0, 2);
+        let v_slice = kv_cache.v_cache(0, 2);
+
+        assert_eq!(k_slice.shape(), &vec![3, 4]); // Expect 3 entries remaining after index 2
+        assert_eq!(v_slice.shape(), &vec![3, 4]);
     }
 }

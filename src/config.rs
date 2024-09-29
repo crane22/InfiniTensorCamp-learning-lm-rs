@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum TensorDType {
+    Float32,
+    Float16,
+}
+
 /// Configuration for the LLaMA model, parsed from JSON.
 /// This structure holds all the essential hyperparameters for the model.
 #[derive(Serialize, Deserialize, Debug)]
@@ -29,12 +36,36 @@ pub(crate) struct LlamaConfigJson {
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
     /// Data type of tensors in the Torch model (e.g., float32, float16).
-    pub torch_dtype: String,
+    pub torch_dtype: TensorDType,
     /// Whether to tie the word embeddings and output layer weights. Defaults to `false`.
     #[serde(default = "default_tie_word_embeddings")]
     pub tie_word_embeddings: bool,
 }
-
+impl LlamaConfigJson {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.hidden_size == 0 {
+            return Err("hidden_size cannot be zero".to_string());
+        }
+        if self.max_position_embeddings < 2 {
+            return Err("max_position_embeddings should be at least 2".to_string());
+        }
+        if self.num_attention_heads == 0 || self.num_attention_heads > self.hidden_size {
+            return Err(
+                format!(
+                    "num_attention_heads must be non-zero and less than or equal to hidden_size ({}). Found: {}",
+                    self.hidden_size, self.num_attention_heads
+                )
+            );
+        }
+        if self.vocab_size == 0 {
+            return Err("vocab_size cannot be zero".to_string());
+        }
+        if self.intermediate_size == 0 {
+            return Err("intermediate_size cannot be zero".to_string());
+        }
+        Ok(())
+    }
+}
 /// Provides a default epsilon value for RMS normalization (1e-5).
 #[inline(always)]
 const fn default_rms_norm_eps() -> f32 {
@@ -51,4 +82,51 @@ const fn default_rope_theta() -> f32 {
 #[inline(always)]
 const fn default_tie_word_embeddings() -> bool {
     false
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_llama_config_defaults() {
+        let json_str = r#"
+        {
+            "bos_token_id": 1,
+            "eos_token_id": 2,
+            "hidden_size": 768,
+            "intermediate_size": 3072,
+            "max_position_embeddings": 512,
+            "num_attention_heads": 12,
+            "num_hidden_layers": 12,
+            "num_key_value_heads": 8,
+            "vocab_size": 32000,
+            "torch_dtype": "float32"
+        }
+        "#;
+        let config: LlamaConfigJson = serde_json::from_str(json_str).unwrap();
+        assert_eq!(config.rms_norm_eps, 1e-5);
+        assert_eq!(config.rope_theta, 1e4);
+        assert_eq!(config.tie_word_embeddings, false);
+    }
+
+    #[test]
+    fn test_llama_config_validation() {
+        let config = LlamaConfigJson {
+            bos_token_id: 1,
+            eos_token_id: 2,
+            hidden_size: 768,
+            intermediate_size: 0, // Invalid value
+            max_position_embeddings: 512,
+            num_attention_heads: 12,
+            num_hidden_layers: 12,
+            num_key_value_heads: 8,
+            vocab_size: 32000,
+            rms_norm_eps: 1e-5,
+            rope_theta: 1e4,
+            torch_dtype: TensorDType::Float32,
+            tie_word_embeddings: false,
+        };
+
+        assert!(config.validate().is_err());
+    }
 }

@@ -1,4 +1,5 @@
-use std::{slice, sync::Arc, vec};
+use crate::float::FloatLike;
+use std::{fmt::Debug, slice, sync::Arc};
 
 /// A struct representing a multidimensional tensor, where `data` holds the underlying array
 /// and `shape` describes its dimensions. The `offset` field allows for slicing, and `length`
@@ -11,8 +12,8 @@ pub struct Tensor<T> {
 }
 
 impl<T: Copy + Clone + Default> Tensor<T> {
-    /// Creates a new tensor with given data and shape. Ensures that the data length matches
-    /// the product of dimensions in the shape.
+    /// Creates a new tensor with the provided data and shape. Ensures that the data length matches
+    /// the product of the dimensions in the shape.
     ///
     /// # Parameters:
     /// - `data`: The actual data values as a flat vector.
@@ -28,7 +29,11 @@ impl<T: Copy + Clone + Default> Tensor<T> {
             "Data size does not match shape"
         );
         Tensor {
-            data: Arc::new(data.into_boxed_slice().try_into().unwrap()),
+            data: Arc::new(
+                data.into_boxed_slice()
+                    .try_into()
+                    .expect("Failed to convert Vec<T> to Box<[T]>"),
+            ),
             shape: shape.clone(),
             offset: 0,
             length,
@@ -105,7 +110,7 @@ impl<T: Copy + Clone + Default> Tensor<T> {
     pub fn slice(&self, start: usize, shape: &Vec<usize>) -> Self {
         let new_length: usize = shape.iter().product();
         assert!(
-            self.offset + start + new_length <= self.length,
+            self.offset + start + new_length <= self.data.len(),
             "Slice exceeds tensor bounds"
         );
         Tensor {
@@ -119,7 +124,7 @@ impl<T: Copy + Clone + Default> Tensor<T> {
 
 impl<T> Tensor<T>
 where
-    T: Copy + Clone + Default + std::ops::Add<Output = T>,
+    T: FloatLike + Copy + Clone + Default + std::ops::Add<Output = T>,
 {
     /// Adds two tensors element-wise and returns a new tensor containing the results.
     ///
@@ -144,11 +149,11 @@ where
             .map(|(a, b)| *a + *b)
             .collect();
 
-        Tensor::new(result_data, &self.shape())
+        Tensor::new(result_data, &self.shape)
     }
 }
 
-impl<T: Clone> Clone for Tensor<T> {
+impl<T: FloatLike + Clone> Clone for Tensor<T> {
     /// Clones the tensor, creating a new instance that shares the same underlying data
     /// but can be independently modified in terms of shape and offset.
     fn clone(&self) -> Self {
@@ -162,7 +167,7 @@ impl<T: Clone> Clone for Tensor<T> {
 }
 
 // Helper functions for numerical comparisons and debugging.
-impl Tensor<f32> {
+impl<T: FloatLike + Default + Debug> Tensor<T> {
     /// Compares two tensors to check if they are approximately equal within a specified relative tolerance.
     ///
     /// # Parameters:
@@ -173,11 +178,12 @@ impl Tensor<f32> {
     /// - `true` if all elements are approximately equal within the tolerance; otherwise, `false`.
     pub fn close_to(&self, other: &Self, rel: f32) -> bool {
         if self.shape() != other.shape() {
+            println!("Shape mismatch: {:?} vs {:?}", self.shape(), other.shape());
             return false;
         }
         let a = self.data();
         let b = other.data();
-        a.iter().zip(b).all(|(x, y)| float_eq(x, y, rel))
+        a.iter().zip(b).all(|(x, y)| x.float_eq(*y, rel))
     }
 
     /// Prints the tensor's shape, offset, and length. Also prints the tensor's data in batches according
@@ -195,9 +201,184 @@ impl Tensor<f32> {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use half::f16;
 
-/// Helper function to compare two `f32` values with a relative tolerance.
-#[inline]
-pub fn float_eq(x: &f32, y: &f32, rel: f32) -> bool {
-    (x - y).abs() <= rel * (x.abs() + y.abs()) / 2.0
+    #[test]
+    fn test_new_f32() {
+        let data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let shape = vec![2, 2];
+        let tensor = Tensor::<f32>::new(data.clone(), &shape);
+        assert_eq!(tensor.data(), &data[..]);
+        assert_eq!(tensor.shape(), &shape);
+    }
+
+    #[test]
+    fn test_new_f16() {
+        let data = vec![
+            f16::from_f32(1.0),
+            f16::from_f32(2.0),
+            f16::from_f32(3.0),
+            f16::from_f32(4.0),
+        ];
+        let shape = vec![2, 2];
+        let tensor = Tensor::<f16>::new(data.clone(), &shape);
+        assert_eq!(tensor.data(), &data[..]);
+        assert_eq!(tensor.shape(), &shape);
+    }
+
+    #[test]
+    fn test_default_f32() {
+        let shape = vec![2, 2];
+        let tensor = Tensor::<f32>::default(&shape);
+        assert_eq!(tensor.data(), &[0.0f32, 0.0, 0.0, 0.0]);
+        assert_eq!(tensor.shape(), &shape);
+    }
+
+    #[test]
+    fn test_default_f16() {
+        let shape = vec![2, 2];
+        let tensor = Tensor::<f16>::default(&shape);
+        let zero = f16::from_f32(0.0);
+        assert_eq!(tensor.data(), &[zero, zero, zero, zero]);
+        assert_eq!(tensor.shape(), &shape);
+    }
+
+    #[test]
+    fn test_reshape_f32() {
+        let mut tensor = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &vec![2, 2]);
+        tensor.reshape(&vec![4]);
+        assert_eq!(tensor.shape(), &vec![4]);
+    }
+
+    #[test]
+    fn test_reshape_f16() {
+        let mut tensor = Tensor::<f16>::new(
+            vec![
+                f16::from_f32(1.0),
+                f16::from_f32(2.0),
+                f16::from_f32(3.0),
+                f16::from_f32(4.0),
+            ],
+            &vec![2, 2],
+        );
+        tensor.reshape(&vec![4]);
+        assert_eq!(tensor.shape(), &vec![4]);
+    }
+
+    #[test]
+    fn test_slice_f32() {
+        let tensor = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &vec![2, 2]);
+        let sliced = tensor.slice(1, &vec![1, 2]);
+        assert_eq!(sliced.data(), &[2.0, 3.0]);
+        assert_eq!(sliced.shape(), &vec![1, 2]);
+    }
+
+    #[test]
+    fn test_slice_f16() {
+        let tensor = Tensor::<f16>::new(
+            vec![
+                f16::from_f32(1.0),
+                f16::from_f32(2.0),
+                f16::from_f32(3.0),
+                f16::from_f32(4.0),
+            ],
+            &vec![2, 2],
+        );
+        let sliced = tensor.slice(2, &vec![1, 2]);
+        assert_eq!(sliced.data(), &[f16::from_f32(3.0), f16::from_f32(4.0)]);
+        assert_eq!(sliced.shape(), &vec![1, 2]);
+    }
+
+    #[test]
+    fn test_add_f32() {
+        let tensor1 = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &vec![2, 2]);
+        let tensor2 = Tensor::<f32>::new(vec![5.0, 6.0, 7.0, 8.0], &vec![2, 2]);
+        let result = tensor1.add(&tensor2);
+        assert_eq!(result.data(), &[6.0, 8.0, 10.0, 12.0]);
+    }
+
+    #[test]
+    fn test_add_f16() {
+        let tensor1 = Tensor::<f16>::new(
+            vec![
+                f16::from_f32(1.0),
+                f16::from_f32(2.0),
+                f16::from_f32(3.0),
+                f16::from_f32(4.0),
+            ],
+            &vec![2, 2],
+        );
+        let tensor2 = Tensor::<f16>::new(
+            vec![
+                f16::from_f32(5.0),
+                f16::from_f32(6.0),
+                f16::from_f32(7.0),
+                f16::from_f32(8.0),
+            ],
+            &vec![2, 2],
+        );
+        let result = tensor1.add(&tensor2);
+        assert_eq!(
+            result.data(),
+            &[
+                f16::from_f32(6.0),
+                f16::from_f32(8.0),
+                f16::from_f32(10.0),
+                f16::from_f32(12.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn test_close_to_f32() {
+        let tensor1 = Tensor::<f32>::new(vec![1.0001, 2.0001, 3.0001, 4.0001], &vec![2, 2]);
+        let tensor2 = Tensor::<f32>::new(vec![1.0002, 2.0002, 3.0002, 4.0002], &vec![2, 2]);
+        assert!(tensor1.close_to(&tensor2, 0.001));
+    }
+
+    #[test]
+    fn test_close_to_f16() {
+        let tensor1 = Tensor::<f16>::new(
+            vec![
+                f16::from_f32(1.0001),
+                f16::from_f32(2.0001),
+                f16::from_f32(3.0001),
+                f16::from_f32(4.0001),
+            ],
+            &vec![2, 2],
+        );
+        let tensor2 = Tensor::<f16>::new(
+            vec![
+                f16::from_f32(1.0002),
+                f16::from_f32(2.0002),
+                f16::from_f32(3.0002),
+                f16::from_f32(4.0002),
+            ],
+            &vec![2, 2],
+        );
+        assert!(tensor1.close_to(&tensor2, 0.001));
+    }
+
+    #[test]
+    fn test_print_f32() {
+        let tensor = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &vec![2, 2]);
+        tensor.print(); // Visually check the output in the test logs
+    }
+
+    #[test]
+    fn test_print_f16() {
+        let tensor = Tensor::<f16>::new(
+            vec![
+                f16::from_f32(1.0),
+                f16::from_f32(2.0),
+                f16::from_f32(3.0),
+                f16::from_f32(4.0),
+            ],
+            &vec![2, 2],
+        );
+        tensor.print(); // Visually check the output in the test logs
+    }
 }
