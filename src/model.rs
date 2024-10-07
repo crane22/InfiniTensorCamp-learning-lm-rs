@@ -178,6 +178,37 @@ impl Llama<f32> {
 
         result_tokens
     }
+
+    pub fn streaming_generate<'a>(
+        &'a self,
+        token_ids: &[u32],
+        max_len: usize,
+        top_p: f32,
+        top_k: u32,
+        temperature: f32,
+        kvcache: &'a mut KVCache<f32>,
+    ) -> impl Iterator<Item = u32> + 'a {
+        let mut result_tokens = token_ids.to_vec();
+        let mut input_tensors =
+            Tensor::<u32>::new(result_tokens.clone(), &vec![result_tokens.len()]);
+
+        std::iter::from_fn(move || {
+            if result_tokens.len() >= max_len {
+                return None;
+            }
+
+            let logits = self.forward(&input_tensors, kvcache);
+            let next_token = OP::random_sample(&logits, top_p, top_k, temperature);
+            result_tokens.push(next_token);
+            input_tensors = Tensor::<u32>::new(vec![next_token], &vec![1]);
+
+            if next_token == self.eos_token_id {
+                None
+            } else {
+                Some(next_token)
+            }
+        })
+    }
 }
 
 fn self_attention(
