@@ -1,112 +1,87 @@
 use crate::config::LlamaConfigJson;
-use crate::float::FloatLike;
 use crate::tensor::Tensor;
-use safetensors::{Dtype, SafeTensors};
+use safetensors::Dtype;
+use safetensors::SafeTensors;
 
-/// A struct representing the parameters of a LLaMA model loaded from SafeTensors format.
-/// Each field holds a tensor corresponding to a specific part of the model.
 pub struct LLamaParams<T> {
-    pub embedding_table: Tensor<T>, // (vocab_size, dim) - Embedding lookup table for token IDs
-    pub rms_att_w: Vec<Tensor<T>>, // (hidden_size,) x layers - RMS normalization weights for attention layers
-    pub wq: Vec<Tensor<T>>, // (n_heads * head_size, hidden_size) x layers - Query projection weights
-    pub wk: Vec<Tensor<T>>, // (n_kv_heads * head_size, hidden_size) x layers - Key projection weights
-    pub wv: Vec<Tensor<T>>, // (n_kv_heads * head_size, hidden_size) x layers - Value projection weights
-    pub wo: Vec<Tensor<T>>, // (hidden_size, n_heads * head_size) x layers - Output projection weights
-    pub rms_ffn_w: Vec<Tensor<T>>, // (hidden_size,) x layers - RMS normalization weights for FFN layers
-    pub w_up: Vec<Tensor<T>>, // (intermediate_size, hidden_size) x layers - FFN up-projection weights
-    pub w_gate: Vec<Tensor<T>>, // (intermediate_size, hidden_size) x layers - FFN gating projection weights
-    pub w_down: Vec<Tensor<T>>, // (hidden_size, intermediate_size) x layers - FFN down-projection weights
-    pub rms_out_w: Tensor<T>,   // (hidden_size,) - Final layer RMS normalization weights
-    pub lm_head: Tensor<T>,     // (vocab_size, dim) - Final projection to vocabulary (output layer)
+    // token_id to embedding lookup table
+    pub embedding_table: Tensor<T>, // (vocab_size, dim)
+    // decoder layer
+    pub rms_att_w: Vec<Tensor<T>>, // (hidden_size, ) x layers
+    pub wq: Vec<Tensor<T>>,        // (n_heads * head_size, hidden_size) x layers
+    pub wk: Vec<Tensor<T>>,        // (n_kv_heads * head_size, hidden_size) x layers
+    pub wv: Vec<Tensor<T>>,        // (n_kv_heads * head_size, hidden_size) x layers
+    pub wo: Vec<Tensor<T>>,        // (hidden_size, n_heads * head_size) x layers
+    // ffn layer
+    pub rms_ffn_w: Vec<Tensor<T>>, // (hidden_size, ) x layers
+    pub w_up: Vec<Tensor<T>>,      // (intermediate_size, hidden_size) x layers
+    pub w_gate: Vec<Tensor<T>>,    // (intermediate_size, hidden_size) x layers
+    pub w_down: Vec<Tensor<T>>,    // (hidden_size, intermediate_size) x layers
+    // output
+    pub rms_out_w: Tensor<T>, // (hidden_size, )
+    pub lm_head: Tensor<T>,   // (vocab_size, dim)
 }
-impl<T: FloatLike + Copy + Default> LLamaParams<T> {
-    /// Loads the parameters of the LLaMA model from a SafeTensors file.
-    /// Converts the SafeTensor data into `Tensor<T>` format and initializes the `LLamaParams` struct.
-    ///
-    /// # Parameters:
-    /// - `safetensor`: A SafeTensors instance that holds the model's weights.
-    /// - `config`: A configuration object providing the model's settings (like layers, dimensions, etc.).
-    ///
-    /// # Returns:
-    /// - An initialized `LLamaParams` struct containing all the model parameters.
+
+impl LLamaParams<f32> {
     pub fn from_safetensors(safetensor: &SafeTensors, config: &LlamaConfigJson) -> Self {
-        let layers = config.num_hidden_layers; // Number of transformer layers in the model
-
-        /// Helper function to extract a tensor from the SafeTensors object using a given name.
-        /// Converts the raw data into `Tensor<T>` format based on the tensor's dtype.
-        ///
-        /// # Parameters:
-        /// - `name`: The name of the tensor in the SafeTensors file.
-        /// - `safetensor`: The SafeTensors object containing the data.
-        ///
-        /// # Returns:
-        /// - A tensor of type `Tensor<T>`.
-        fn get_tensor<T: FloatLike + Copy>(name: &str, safetensor: &SafeTensors) -> Tensor<T> {
-            let tensor_view = safetensor.tensor(name).unwrap();
+        let get_tensor = |name: &str| {
+            let tensor_view = safetensor
+                .tensor(name)
+                .unwrap_or_else(|_| panic!("Tensor `{}` not found in safetensors", name));
             let dtype = tensor_view.dtype();
-
+            let element_size = dtype.size();
             match dtype {
                 Dtype::F32 => {
-                    let vec_f32s = tensor_view
+                    let data = tensor_view
                         .data()
-                        .chunks_exact(4)
-                        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
-                        .map(T::from_f32) // Convert `f32` to generic `T`
-                        .collect::<Vec<T>>();
-                    Tensor::new(vec_f32s, &tensor_view.shape().to_vec())
+                        .chunks(element_size)
+                        .map(|chunk| {
+                            f32::from_le_bytes(chunk.try_into().expect("Chunk is not 4 bytes long"))
+                        })
+                        .collect();
+                    let shape = tensor_view.shape().to_vec();
+                    Tensor::<f32>::new(data, &shape)
                 }
-                Dtype::F16 => {
-                    let vec_f16s = tensor_view
-                        .data()
-                        .chunks_exact(2)
-                        .map(|chunk| half::f16::from_le_bytes([chunk[0], chunk[1]]))
-                        .map(|f16| T::from_f32(f16.to_f32())) // Convert `f16` to `T`
-                        .collect::<Vec<T>>();
-                    Tensor::new(vec_f16s, &tensor_view.shape().to_vec())
-                }
-                _ => panic!("Unsupported dtype in SafeTensors: {:?}", dtype),
+                _ => panic!("Unsupported dtype `{:?}` found in safetensors", dtype),
             }
-        }
+        };
 
-        /// Helper function to extract tensors for each layer from the SafeTensors object.
-        /// It loads a vector of tensors corresponding to a particular weight type (e.g., wq, wk).
-        ///
-        /// # Parameters:
-        /// - `safetensor`: The SafeTensors object containing the data.
-        /// - `layers`: Number of layers in the model.
-        /// - `name`: The common name for the tensor (layer-specific names will be constructed).
-        ///
-        /// # Returns:
-        /// - A vector of tensors, one for each layer.
-        fn get_tensor_vec<T: FloatLike + Copy>(
-            safetensor: &SafeTensors,
-            layers: usize,
-            name: &str,
-        ) -> Vec<Tensor<T>> {
-            (0..layers)
-                .map(|layer_idx| {
-                    let tensor_name = format!("model.layers.{layer_idx}.{name}");
-                    get_tensor(&tensor_name, safetensor)
-                })
-                .collect()
-        }
-
+        let n_layers = config.num_hidden_layers;
         LLamaParams {
-            // Load embedding lookup table and final projection layer
-            embedding_table: get_tensor("lm_head.weight", safetensor), // (vocab_size, dim)
-            rms_out_w: get_tensor("model.norm.weight", safetensor),    // (hidden_size,)
-            lm_head: get_tensor("lm_head.weight", safetensor),         // (vocab_size, dim)
-
-            // Load transformer layer-specific weights
-            rms_att_w: get_tensor_vec(safetensor, layers, "input_layernorm.weight"),
-            rms_ffn_w: get_tensor_vec(safetensor, layers, "post_attention_layernorm.weight"),
-            wq: get_tensor_vec(safetensor, layers, "self_attn.q_proj.weight"),
-            wk: get_tensor_vec(safetensor, layers, "self_attn.k_proj.weight"),
-            wv: get_tensor_vec(safetensor, layers, "self_attn.v_proj.weight"),
-            wo: get_tensor_vec(safetensor, layers, "self_attn.o_proj.weight"),
-            w_up: get_tensor_vec(safetensor, layers, "mlp.up_proj.weight"),
-            w_gate: get_tensor_vec(safetensor, layers, "mlp.gate_proj.weight"),
-            w_down: get_tensor_vec(safetensor, layers, "mlp.down_proj.weight"),
+            embedding_table: if config.tie_word_embeddings {
+                get_tensor("lm_head.weight")
+            } else {
+                get_tensor("model.embed_tokens.weight")
+            },
+            rms_att_w: (0..n_layers)
+                .map(|f| get_tensor(&format!("model.layers.{f}.input_layernorm.weight")))
+                .collect(),
+            wq: (0..n_layers)
+                .map(|f| get_tensor(&format!("model.layers.{f}.self_attn.q_proj.weight")))
+                .collect(),
+            wk: (0..n_layers)
+                .map(|f| get_tensor(&format!("model.layers.{f}.self_attn.k_proj.weight")))
+                .collect(),
+            wv: (0..n_layers)
+                .map(|f| get_tensor(&format!("model.layers.{f}.self_attn.v_proj.weight")))
+                .collect(),
+            wo: (0..n_layers)
+                .map(|f| get_tensor(&format!("model.layers.{f}.self_attn.o_proj.weight")))
+                .collect(),
+            rms_ffn_w: (0..n_layers)
+                .map(|f| get_tensor(&format!("model.layers.{f}.post_attention_layernorm.weight")))
+                .collect(),
+            w_up: (0..n_layers)
+                .map(|f| get_tensor(&format!("model.layers.{f}.mlp.up_proj.weight")))
+                .collect(),
+            w_gate: (0..n_layers)
+                .map(|f| get_tensor(&format!("model.layers.{f}.mlp.gate_proj.weight")))
+                .collect(),
+            w_down: (0..n_layers)
+                .map(|f| get_tensor(&format!("model.layers.{f}.mlp.down_proj.weight")))
+                .collect(),
+            rms_out_w: get_tensor("model.norm.weight"),
+            lm_head: get_tensor("lm_head.weight"),
         }
     }
 }
