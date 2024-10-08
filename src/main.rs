@@ -5,6 +5,9 @@ mod operators;
 mod params;
 mod tensor;
 
+use crate::config::LlamaConfigJson;
+use crate::config::TensorDType;
+use half::f16;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use tokenizers::Tokenizer;
@@ -16,19 +19,40 @@ struct Message {
 
 impl Message {
     fn format(&self) -> String {
-        format!("<|im_start|>{}{}<|im_end|>", self.role, self.content)
+        format!("<|im_start|>{}\n{}<|im_end|>", self.role, self.content)
     }
 }
 
 fn main() {
     let project_dir = env!("CARGO_MANIFEST_DIR");
     let model_dir = PathBuf::from(project_dir).join("models").join("chat");
-    let llama = model::Llama::<f32>::from_safetensors(&model_dir);
-    let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
-    chat(&llama, &tokenizer);
+
+    // Load the Llama model configuration to get the data type (f16 or f32)
+    let config_file = std::fs::File::open(model_dir.join("config.json")).unwrap();
+    let config: LlamaConfigJson = serde_json::from_reader(config_file).unwrap();
+
+    // Load the model based on the TensorDType
+    match config.torch_dtype {
+        TensorDType::Float16 => {
+            // Load the Llama model with f16 type
+            let llama = model::Llama::<f16>::from_safetensors(&model_dir);
+            let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
+            chat(&llama, &tokenizer, f16::from_f32(1.0));
+        }
+        TensorDType::Float32 => {
+            // Load the Llama model with f32 type
+            let llama = model::Llama::<f32>::from_safetensors(&model_dir);
+            let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
+            chat(&llama, &tokenizer, 1.0);
+        }
+    };
 }
 
-fn chat(llama: &model::Llama<f32>, tokenizer: &Tokenizer) {
+fn chat<T: num_traits::Float + Default + Copy + num_traits::FromPrimitive + std::iter::Sum>(
+    llama: &model::Llama<T>,
+    tokenizer: &Tokenizer,
+    temperature: T,
+) {
     let mut kvcache = llama.new_cache();
     let mut messages: Vec<Message> = vec![];
 
@@ -60,7 +84,14 @@ fn chat(llama: &model::Llama<f32>, tokenizer: &Tokenizer) {
         print!("Assistant: ");
         io::stdout().flush().unwrap();
 
-        let response_tokens = llama.streaming_generate(input_ids, 512, 0.9, 4, 1.0, &mut kvcache);
+        let response_tokens = llama.streaming_generate(
+            input_ids,
+            512,
+            T::from(0.9).unwrap(),
+            4,
+            temperature,
+            &mut kvcache,
+        );
         for token in response_tokens {
             let word = tokenizer.decode(&[token], true).unwrap() + " ";
             print!("{}", word);

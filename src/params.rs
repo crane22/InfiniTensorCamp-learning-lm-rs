@@ -1,7 +1,8 @@
 use crate::config::LlamaConfigJson;
 use crate::tensor::Tensor;
-use safetensors::Dtype;
-use safetensors::SafeTensors;
+use half::f16;
+use num_traits::{Float, FromPrimitive};
+use safetensors::{Dtype, SafeTensors};
 
 pub struct LLamaParams<T> {
     // token_id to embedding lookup table
@@ -22,7 +23,7 @@ pub struct LLamaParams<T> {
     pub lm_head: Tensor<T>,   // (vocab_size, dim)
 }
 
-impl LLamaParams<f32> {
+impl<T: Float + Default + Copy + FromPrimitive> LLamaParams<T> {
     pub fn from_safetensors(safetensor: &SafeTensors, config: &LlamaConfigJson) -> Self {
         let get_tensor = |name: &str| {
             let tensor_view = safetensor
@@ -38,9 +39,20 @@ impl LLamaParams<f32> {
                         .map(|chunk| {
                             f32::from_le_bytes(chunk.try_into().expect("Chunk is not 4 bytes long"))
                         })
+                        .map(|v| T::from_f32(v).unwrap())
                         .collect();
                     let shape = tensor_view.shape().to_vec();
-                    Tensor::<f32>::new(data, &shape)
+                    Tensor::<T>::new(data, &shape)
+                }
+                Dtype::F16 => {
+                    let data = tensor_view
+                        .data()
+                        .chunks(element_size)
+                        .map(|chunk| f16::from_le_bytes([chunk[0], chunk[1]]))
+                        .map(|f| T::from_f32(f.to_f32()).unwrap())
+                        .collect();
+                    let shape = tensor_view.shape().to_vec();
+                    Tensor::<T>::new(data, &shape)
                 }
                 _ => panic!("Unsupported dtype `{:?}` found in safetensors", dtype),
             }

@@ -1,7 +1,15 @@
 use crate::tensor::Tensor;
+use half::f16;
+use num_traits::{Float, FromPrimitive};
+use std::{slice, sync::Arc, vec};
 
-// get (row) vectors from a 2D table given a list of indices
-pub fn gather(y: &mut Tensor<f32>, indices: &Tensor<u32>, table: &Tensor<f32>) {
+// Gather function to extract (row) vectors from a 2D table based on given indices.
+// Now supports `f16` half precision.
+pub fn gather<T: Float + Default + Copy>(
+    y: &mut Tensor<T>,
+    indices: &Tensor<u32>,
+    table: &Tensor<T>,
+) {
     let length = indices.size();
     let table_shape = table.shape();
     assert!(table_shape.len() == 2);
@@ -17,7 +25,8 @@ pub fn gather(y: &mut Tensor<f32>, indices: &Tensor<u32>, table: &Tensor<f32>) {
 }
 
 // RoPE: Rotary Positional Embedding
-pub fn rope(y: &mut Tensor<f32>, start_pos: usize, theta: f32) {
+// Now supports `f16` half precision.
+pub fn rope<T: Float + Default + Copy>(y: &mut Tensor<T>, start_pos: usize, theta: T) {
     let shape = y.shape();
     assert!(shape.len() == 3);
     let seq_len = shape[0];
@@ -30,7 +39,8 @@ pub fn rope(y: &mut Tensor<f32>, start_pos: usize, theta: f32) {
             for i in 0..d / 2 {
                 let a = data[tok * n_heads * d + head * d + i];
                 let b = data[tok * n_heads * d + head * d + i + d / 2];
-                let freq = pos as f32 / theta.powf((i * 2) as f32 / d as f32);
+                let freq = T::from(pos).unwrap()
+                    / theta.powf(T::from(i * 2).unwrap() / T::from(d).unwrap());
                 let (sin, cos) = freq.sin_cos();
                 data[tok * n_heads * d + head * d + i] = a * cos - b * sin;
                 data[tok * n_heads * d + head * d + i + d / 2] = b * cos + a * sin;
@@ -39,9 +49,9 @@ pub fn rope(y: &mut Tensor<f32>, start_pos: usize, theta: f32) {
     }
 }
 
-// softmax(x) = exp(x - max) / sum(exp(x - max))
-// y = softmax(mask(x))
-pub fn masked_softmax(y: &mut Tensor<f32>) {
+// masked_softmax function
+// Now supports `f16` half precision.
+pub fn masked_softmax<T: Float + Default + Copy + std::iter::Sum>(y: &mut Tensor<T>) {
     let ndim = y.shape().len();
     assert!(ndim >= 2);
     let seq_len = y.shape()[ndim - 2];
@@ -64,18 +74,26 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
                     data[offset + j] = e;
                     e
                 })
-                .sum::<f32>();
+                .sum::<T>();
 
-            (0..boundary).for_each(|j| data[offset + j] /= sum);
-            (boundary..total_seq_len).for_each(|j| data[offset + j] = 0.0);
+            for j in 0..boundary {
+                data[offset + j] = data[offset + j] / sum;
+            }
+            for j in boundary..total_seq_len {
+                data[offset + j] = T::zero();
+            }
         }
     }
 }
 
-// rms = sqrt((sum(x^2) / n) + epsilon)
-// y = x * w / rms
-pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
-    // Ensure the input tensors have the correct sizes
+// rms_norm function
+// Now supports `f16` half precision.
+pub fn rms_norm<T: Float + Default + Copy + std::iter::Sum>(
+    y: &mut Tensor<T>,
+    x: &Tensor<T>,
+    w: &Tensor<T>,
+    epsilon: T,
+) {
     assert!(
         y.shape() == x.shape(),
         "Input and output tensors must have the same shape"
@@ -102,19 +120,19 @@ pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: 
         let x_slice = &x_data[left..right];
         let y_slice = &mut y_data[left..right];
 
-        // Compute the RMS value for the current slice
-        let rms = (x_slice.iter().map(|&val| val * val).sum::<f32>() / x_last_dim as f32 + epsilon)
+        let rms = (x_slice.iter().map(|&val| val * val).sum::<T>() / T::from(x_last_dim).unwrap()
+            + epsilon)
             .sqrt();
 
-        // Normalize and apply the weights
         for j in 0..x_last_dim {
             y_slice[j] = w_data[j] * x_slice[j] / rms;
         }
     }
 }
 
-// y = sigmoid(x) * x * y
-pub fn silu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
+// SiLU activation function
+// Now supports `f16` half precision.
+pub fn silu<T: Float + Default + Copy>(y: &mut Tensor<T>, x: &Tensor<T>) {
     assert!(
         y.shape() == x.shape(),
         "Input and output tensors must have the same shape"
@@ -125,14 +143,20 @@ pub fn silu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
     let x_data = x.data();
 
     for i in 0..length {
-        let x_sigmoid = 1.0 / (1.0 + (-x_data[i]).exp());
-        y_data[i] *= x_sigmoid * x_data[i];
+        let x_sigmoid = T::one() / (T::one() + (-x_data[i]).exp());
+        y_data[i] = y_data[i] * x_sigmoid * x_data[i];
     }
 }
 
-// C = beta * C + alpha * A @ B^T
-pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor<f32>, alpha: f32) {
-    // Ensure the input tensors have the correct sizes
+// Matrix multiplication with the second matrix transposed
+// Now supports `f16` half precision.
+pub fn matmul_transb<T: Float + Default + Copy>(
+    c: &mut Tensor<T>,
+    beta: T,
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    alpha: T,
+) {
     let (a_row, a_col) = (a.shape()[0], a.shape()[1]);
     let (b_row, b_col) = (b.shape()[0], b.shape()[1]);
     let (c_row, c_col) = (c.shape()[0], c.shape()[1]);
@@ -147,36 +171,27 @@ pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor
     let a_data = a.data();
     let b_data = b.data();
 
-    // Compute alpha * A @ B^T + beta * C
     for i in 0..c_row {
         for j in 0..c_col {
-            let mut sum = 0.0;
+            let mut sum = T::zero();
             for k in 0..a_col {
-                sum += a_data[i * a_col + k] * b_data[j * b_col + k];
+                sum = sum + a_data[i * a_col + k] * b_data[j * b_col + k];
             }
             c_data[i * c_col + j] = beta * c_data[i * c_col + j] + alpha * sum;
         }
     }
 }
 
-// Dot product of two tensors (treated as vectors)
-#[allow(unused)]
-pub fn dot(x: &Tensor<f32>, y: &Tensor<f32>) -> f32 {
-    let len = x.size();
-    assert!(len == y.size());
-    let x_ = x.data();
-    let y_ = y.data();
-    let mut sum = 0.0;
-    for i in 0..len {
-        sum += x_[i] * y_[i];
-    }
-    sum
-}
-
-// Sample a index from a tensor (treated as a probability vector)
-pub fn random_sample(x: &Tensor<f32>, top_p: f32, top_k: u32, temperature: f32) -> u32 {
+// Random sampling from a probability vector
+// Now supports `f16` half precision.
+pub fn random_sample<T: Float + Default + Copy + PartialOrd + FromPrimitive>(
+    x: &Tensor<T>,
+    top_p: T,
+    top_k: u32,
+    temperature: T,
+) -> u32 {
     assert!(x.shape()[x.shape().len() - 1] == x.size());
-    if temperature <= 0. || top_k < 2 || top_p <= 0. {
+    if temperature <= T::zero() || top_k < 2 || top_p <= T::zero() {
         return x
             .data()
             .iter()
@@ -187,37 +202,36 @@ pub fn random_sample(x: &Tensor<f32>, top_p: f32, top_k: u32, temperature: f32) 
     }
 
     #[derive(Clone, Copy, PartialEq, Debug)]
-    struct Probability {
-        val: f32,
+    struct Probability<T> {
+        val: T,
         tok: u32,
     }
-    impl Eq for Probability {}
-    impl PartialOrd for Probability {
+    impl<T: PartialOrd> Eq for Probability<T> {}
+    impl<T: PartialOrd> PartialOrd for Probability<T> {
         #[inline]
         fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
             Some(self.cmp(other))
         }
     }
-    impl Ord for Probability {
+    impl<T: PartialOrd> Ord for Probability<T> {
         #[inline]
         fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-            match self.val.total_cmp(&other.val) {
-                std::cmp::Ordering::Equal => self.tok.cmp(&other.tok),
-                ord => ord.reverse(),
-            }
+            self.val.partial_cmp(&other.val).unwrap().reverse()
         }
     }
-    impl From<(usize, &f32)> for Probability {
+    impl<T> From<(usize, &T)> for Probability<T>
+    where
+        T: Float + Copy,
+    {
         #[inline]
-        fn from((i, p): (usize, &f32)) -> Self {
+        fn from((i, p): (usize, &T)) -> Self {
             Self {
-                val: p.clone(),
+                val: *p,
                 tok: i as _,
             }
         }
     }
 
-    // sort
     let mut logits = x
         .data()
         .iter()
@@ -225,19 +239,28 @@ pub fn random_sample(x: &Tensor<f32>, top_p: f32, top_k: u32, temperature: f32) 
         .map(Probability::from)
         .collect::<Vec<_>>();
     logits.sort_unstable();
-    let max = core::mem::replace(&mut logits[0].val, 1.);
-    // softmax & sum
-    for i in 1..logits.len() {
-        logits[i].val = logits[i - 1].val + ((logits[i].val - max) / temperature).exp();
+    let max = logits[0].val;
+    for i in 0..logits.len() {
+        logits[i].val = (logits[i].val - max).exp();
     }
-    // topk & topp & random
-    let pk = logits[(top_k as usize).min(logits.len()) - 1].val;
-    let pp = logits[logits.len() - 1].val * top_p;
-    let plimit = rand::random::<f32>() * f32::min(pk, pp);
-    // sample
-    logits.iter().find(|p| p.val >= plimit).unwrap().tok
-}
 
+    let mut sum_exp = T::zero();
+    for prob in logits.iter_mut() {
+        prob.val = prob.val / temperature;
+        sum_exp = sum_exp + prob.val;
+    }
+
+    let mut accum = T::zero();
+    let rand_thresh = T::from_f32(rand::random::<f32>()).unwrap() * sum_exp;
+    for prob in &logits {
+        accum = accum + prob.val;
+        if accum >= rand_thresh {
+            return prob.tok;
+        }
+    }
+
+    logits[0].tok
+}
 // // Parallelize these operators
 // use rayon::prelude::*;
 // // get (row) vectors from a 2D table given a list of indices
