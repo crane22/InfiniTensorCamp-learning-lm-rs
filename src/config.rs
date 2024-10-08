@@ -1,10 +1,35 @@
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, Deserializer, Unexpected},
+    Deserialize, Serialize,
+};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum TensorDType {
     Float32,
     Float16,
+    BFloat16,
+}
+
+impl<'de> Deserialize<'de> for TensorDType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: String = Deserialize::deserialize(deserializer)?;
+        match s.as_str() {
+            "float32" => Ok(TensorDType::Float32),
+            "float16" => Ok(TensorDType::Float16),
+            "bfloat16" => Ok(TensorDType::BFloat16),
+            _ => {
+                // If the value doesn't match any variant, return a default or custom error
+                Err(de::Error::invalid_value(
+                    Unexpected::Str(&s),
+                    &"valid tensor dtype",
+                ))
+            }
+        }
+    }
 }
 
 /// Configuration for the LLaMA model, parsed from JSON.
@@ -43,32 +68,6 @@ pub(crate) struct LlamaConfigJson {
     pub tie_word_embeddings: bool,
 }
 
-impl LlamaConfigJson {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.hidden_size == 0 {
-            return Err("hidden_size cannot be zero".to_string());
-        }
-        if self.max_position_embeddings < 2 {
-            return Err("max_position_embeddings should be at least 2".to_string());
-        }
-        if self.num_attention_heads == 0 || self.num_attention_heads > self.hidden_size {
-            return Err(
-                format!(
-                    "num_attention_heads must be non-zero and less than or equal to hidden_size ({}). Found: {}",
-                    self.hidden_size, self.num_attention_heads
-                )
-            );
-        }
-        if self.vocab_size == 0 {
-            return Err("vocab_size cannot be zero".to_string());
-        }
-        if self.intermediate_size == 0 {
-            return Err("intermediate_size cannot be zero".to_string());
-        }
-        Ok(())
-    }
-}
-
 /// Provides a default epsilon value for RMS normalization (1e-5).
 #[inline(always)]
 const fn default_rms_norm_eps() -> f32 {
@@ -81,14 +80,14 @@ const fn default_rope_theta() -> f32 {
     1e4
 }
 
-/// Provides a default value for whether word embeddings should be tied (false).
-#[inline(always)]
-const fn default_tie_word_embeddings() -> bool {
-    false
-}
-
 /// Provides a default value for the tensor data type (float32).
 #[inline(always)]
 fn default_torch_dtype() -> TensorDType {
     TensorDType::Float32
+}
+
+/// Provides a default value for whether word embeddings should be tied (false).
+#[inline(always)]
+const fn default_tie_word_embeddings() -> bool {
+    false
 }

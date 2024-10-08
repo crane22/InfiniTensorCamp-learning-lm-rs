@@ -1,8 +1,9 @@
+use half::{bf16, f16};
+use num_traits::{Float, FromPrimitive};
+use safetensors::SafeTensors;
+
 use crate::config::LlamaConfigJson;
 use crate::tensor::Tensor;
-use half::f16;
-use num_traits::{Float, FromPrimitive};
-use safetensors::{Dtype, SafeTensors};
 
 pub struct LLamaParams<T> {
     // token_id to embedding lookup table
@@ -23,39 +24,21 @@ pub struct LLamaParams<T> {
     pub lm_head: Tensor<T>,   // (vocab_size, dim)
 }
 
-impl<T: Float + Default + Copy + FromPrimitive> LLamaParams<T> {
+impl<T: Default + Copy + Float + FromPrimitive + FromLeBytes> LLamaParams<T> {
     pub fn from_safetensors(safetensor: &SafeTensors, config: &LlamaConfigJson) -> Self {
-        let get_tensor = |name: &str| {
+        let get_tensor = |name: &str| -> Tensor<T> {
             let tensor_view = safetensor
                 .tensor(name)
                 .unwrap_or_else(|_| panic!("Tensor `{}` not found in safetensors", name));
-            let dtype = tensor_view.dtype();
-            let element_size = dtype.size();
-            match dtype {
-                Dtype::F32 => {
-                    let data = tensor_view
-                        .data()
-                        .chunks(element_size)
-                        .map(|chunk| {
-                            f32::from_le_bytes(chunk.try_into().expect("Chunk is not 4 bytes long"))
-                        })
-                        .map(|v| T::from_f32(v).unwrap())
-                        .collect();
-                    let shape = tensor_view.shape().to_vec();
-                    Tensor::<T>::new(data, &shape)
-                }
-                Dtype::F16 => {
-                    let data = tensor_view
-                        .data()
-                        .chunks(element_size)
-                        .map(|chunk| f16::from_le_bytes([chunk[0], chunk[1]]))
-                        .map(|f| T::from_f32(f.to_f32()).unwrap())
-                        .collect();
-                    let shape = tensor_view.shape().to_vec();
-                    Tensor::<T>::new(data, &shape)
-                }
-                _ => panic!("Unsupported dtype `{:?}` found in safetensors", dtype),
-            }
+            let tensor_dtype = tensor_view.dtype();
+            let element_size = tensor_dtype.size();
+            let data = tensor_view
+                .data()
+                .chunks_exact(element_size)
+                .map(|chunk| T::from_le_bytes(chunk))
+                .collect::<Vec<T>>();
+            let shape = tensor_view.shape().to_vec();
+            Tensor::<T>::new(data, &shape)
         };
 
         let n_layers = config.num_hidden_layers;
@@ -95,5 +78,25 @@ impl<T: Float + Default + Copy + FromPrimitive> LLamaParams<T> {
             rms_out_w: get_tensor("model.norm.weight"),
             lm_head: get_tensor("lm_head.weight"),
         }
+    }
+}
+
+/// Trait to convert from little-endian bytes to type T
+pub trait FromLeBytes: Sized {
+    fn from_le_bytes(bytes: &[u8]) -> Self;
+}
+impl FromLeBytes for f32 {
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        f32::from_le_bytes(bytes.try_into().expect("Invalid byte length for f32"))
+    }
+}
+impl FromLeBytes for f16 {
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        f16::from_le_bytes([bytes[0], bytes[1]])
+    }
+}
+impl FromLeBytes for bf16 {
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        bf16::from_le_bytes([bytes[0], bytes[1]])
     }
 }

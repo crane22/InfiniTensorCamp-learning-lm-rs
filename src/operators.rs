@@ -1,11 +1,10 @@
-use crate::tensor::Tensor;
-use half::f16;
 use num_traits::{Float, FromPrimitive};
-use std::{slice, sync::Arc, vec};
+use std::iter::Sum;
+
+use crate::tensor::Tensor;
 
 // Gather function to extract (row) vectors from a 2D table based on given indices.
-// Now supports `f16` half precision.
-pub fn gather<T: Float + Default + Copy>(
+pub fn gather<T: Default + Copy + Float>(
     y: &mut Tensor<T>,
     indices: &Tensor<u32>,
     table: &Tensor<T>,
@@ -25,8 +24,7 @@ pub fn gather<T: Float + Default + Copy>(
 }
 
 // RoPE: Rotary Positional Embedding
-// Now supports `f16` half precision.
-pub fn rope<T: Float + Default + Copy>(y: &mut Tensor<T>, start_pos: usize, theta: T) {
+pub fn rope<T: Default + Copy + Float>(y: &mut Tensor<T>, start_pos: usize, theta: T) {
     let shape = y.shape();
     assert!(shape.len() == 3);
     let seq_len = shape[0];
@@ -50,8 +48,7 @@ pub fn rope<T: Float + Default + Copy>(y: &mut Tensor<T>, start_pos: usize, thet
 }
 
 // masked_softmax function
-// Now supports `f16` half precision.
-pub fn masked_softmax<T: Float + Default + Copy + std::iter::Sum>(y: &mut Tensor<T>) {
+pub fn masked_softmax<T: Default + Copy + Sum + Float>(y: &mut Tensor<T>) {
     let ndim = y.shape().len();
     assert!(ndim >= 2);
     let seq_len = y.shape()[ndim - 2];
@@ -87,8 +84,7 @@ pub fn masked_softmax<T: Float + Default + Copy + std::iter::Sum>(y: &mut Tensor
 }
 
 // rms_norm function
-// Now supports `f16` half precision.
-pub fn rms_norm<T: Float + Default + Copy + std::iter::Sum>(
+pub fn rms_norm<T: Default + Copy + Sum + Float>(
     y: &mut Tensor<T>,
     x: &Tensor<T>,
     w: &Tensor<T>,
@@ -131,8 +127,7 @@ pub fn rms_norm<T: Float + Default + Copy + std::iter::Sum>(
 }
 
 // SiLU activation function
-// Now supports `f16` half precision.
-pub fn silu<T: Float + Default + Copy>(y: &mut Tensor<T>, x: &Tensor<T>) {
+pub fn silu<T: Default + Copy + Float>(y: &mut Tensor<T>, x: &Tensor<T>) {
     assert!(
         y.shape() == x.shape(),
         "Input and output tensors must have the same shape"
@@ -149,8 +144,7 @@ pub fn silu<T: Float + Default + Copy>(y: &mut Tensor<T>, x: &Tensor<T>) {
 }
 
 // Matrix multiplication with the second matrix transposed
-// Now supports `f16` half precision.
-pub fn matmul_transb<T: Float + Default + Copy>(
+pub fn matmul_transb<T: Default + Copy + Float>(
     c: &mut Tensor<T>,
     beta: T,
     a: &Tensor<T>,
@@ -183,8 +177,7 @@ pub fn matmul_transb<T: Float + Default + Copy>(
 }
 
 // Random sampling from a probability vector
-// Now supports `f16` half precision.
-pub fn random_sample<T: Float + Default + Copy + PartialOrd + FromPrimitive>(
+pub fn random_sample<T: Default + Copy + PartialOrd + Float + FromPrimitive>(
     x: &Tensor<T>,
     top_p: T,
     top_k: u32,

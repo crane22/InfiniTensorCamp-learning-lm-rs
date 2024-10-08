@@ -1,6 +1,5 @@
-use half::f16;
 use num_traits::Float;
-use std::{slice, sync::Arc, vec};
+use std::{fmt::Debug, slice, sync::Arc, vec};
 
 pub struct Tensor<T> {
     data: Arc<Box<[T]>>,
@@ -76,7 +75,18 @@ impl<T: Copy + Clone + Default> Tensor<T> {
     }
 }
 
-impl<T: Float + Copy + Clone + Default + std::fmt::Debug> Tensor<T> {
+impl<T: Clone + Float> Clone for Tensor<T> {
+    fn clone(&self) -> Self {
+        Tensor {
+            data: Arc::clone(&self.data),
+            shape: self.shape.clone(),
+            offset: self.offset,
+            length: self.length,
+        }
+    }
+}
+
+impl<T: Copy + Clone + Default + Debug + Float> Tensor<T> {
     pub fn close_to(&self, other: &Self, rel: T) -> bool {
         if self.shape() != other.shape() {
             return false;
@@ -97,37 +107,6 @@ impl<T: Float + Copy + Clone + Default + std::fmt::Debug> Tensor<T> {
         for i in 0..batch {
             let start = i * dim;
             println!("{:?}", &self.data()[start..][..dim]);
-        }
-    }
-}
-
-impl Tensor<f16> {
-    pub fn float_to_f16(input: &Tensor<f32>) -> Self {
-        let data = input
-            .data()
-            .iter()
-            .map(|&val| f16::from_f32(val))
-            .collect::<Vec<_>>();
-        Tensor::new(data, &input.shape().clone())
-    }
-
-    pub fn f16_to_float(&self) -> Tensor<f32> {
-        let data = self
-            .data()
-            .iter()
-            .map(|&val| val.to_f32())
-            .collect::<Vec<_>>();
-        Tensor::new(data, &self.shape().clone())
-    }
-}
-
-impl<T: Float + Clone> Clone for Tensor<T> {
-    fn clone(&self) -> Self {
-        Tensor {
-            data: Arc::clone(&self.data),
-            shape: self.shape.clone(),
-            offset: self.offset,
-            length: self.length,
         }
     }
 }

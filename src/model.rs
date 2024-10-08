@@ -1,15 +1,15 @@
-use half::f16;
 use num_traits::{Float, FromPrimitive};
+use safetensors::SafeTensors;
 use std::fs::File;
+use std::iter::Sum;
+use std::path::Path;
 use std::vec;
 
 use crate::config::LlamaConfigJson;
 use crate::kvcache::KVCache;
 use crate::operators as OP;
-use crate::params::LLamaParams;
+use crate::params::{FromLeBytes, LLamaParams};
 use crate::tensor::Tensor;
-use safetensors::SafeTensors;
-use std::path::Path;
 
 pub struct Llama<T> {
     vocab: usize,           // vocab size
@@ -27,7 +27,7 @@ pub struct Llama<T> {
     eos_token_id: u32,      // end token id
 }
 
-impl<T: Float + Default + Copy + FromPrimitive + std::iter::Sum> Llama<T> {
+impl<T: Default + Copy + Sum + Float + FromPrimitive + FromLeBytes> Llama<T> {
     pub fn from_safetensors(model_dir: impl AsRef<Path>) -> Self {
         let config = File::open(model_dir.as_ref().join("config.json")).unwrap();
         let config: LlamaConfigJson = serde_json::from_reader(config).unwrap();
@@ -238,7 +238,7 @@ impl<T: Float + Default + Copy + FromPrimitive + std::iter::Sum> Llama<T> {
     }
 }
 
-fn self_attention<T: Float + Default + Copy + FromPrimitive + std::iter::Sum>(
+fn self_attention<T: Default + Copy + Sum + Float + FromPrimitive>(
     hidden_states: &mut Tensor<T>, // (seq, n_kv_h * n_groups * dqkv)
     att_scores: &mut Tensor<T>,    // (n_kv_h, n_groups, seq, total_seq)
     q: &Tensor<T>,                 // (seq, n_kv_h * n_groups * dqkv)
@@ -323,7 +323,7 @@ fn self_attention<T: Float + Default + Copy + FromPrimitive + std::iter::Sum>(
     }
 }
 
-fn mlp<T: Float + Default + Copy + FromPrimitive + std::iter::Sum>(
+fn mlp<T: Default + Copy + Sum + Float + FromPrimitive>(
     residual: &mut Tensor<T>,
     hidden_states: &mut Tensor<T>,
     gate: &mut Tensor<T>,

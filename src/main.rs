@@ -5,12 +5,15 @@ mod operators;
 mod params;
 mod tensor;
 
-use crate::config::LlamaConfigJson;
-use crate::config::TensorDType;
-use half::f16;
+use half::{bf16, f16};
+use num_traits::{Float, FromPrimitive};
 use std::io::{self, Write};
+use std::iter::Sum;
 use std::path::PathBuf;
 use tokenizers::Tokenizer;
+
+use crate::config::{LlamaConfigJson, TensorDType};
+use crate::params::FromLeBytes;
 
 struct Message {
     role: String,
@@ -19,7 +22,7 @@ struct Message {
 
 impl Message {
     fn format(&self) -> String {
-        format!("<|im_start|>{}\n{}<|im_end|>", self.role, self.content)
+        format!("<|im_start|>{}\n{}<|im_end|>\n", self.role, self.content)
     }
 }
 
@@ -27,28 +30,36 @@ fn main() {
     let project_dir = env!("CARGO_MANIFEST_DIR");
     let model_dir = PathBuf::from(project_dir).join("models").join("chat");
 
-    // Load the Llama model configuration to get the data type (f16 or f32)
+    // Load the Llama model configuration to get the data type (f16 or f32 or bf16)
     let config_file = std::fs::File::open(model_dir.join("config.json")).unwrap();
     let config: LlamaConfigJson = serde_json::from_reader(config_file).unwrap();
 
     // Load the model based on the TensorDType
     match config.torch_dtype {
-        TensorDType::Float16 => {
-            // Load the Llama model with f16 type
-            let llama = model::Llama::<f16>::from_safetensors(&model_dir);
-            let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
-            chat(&llama, &tokenizer, f16::from_f32(1.0));
-        }
         TensorDType::Float32 => {
             // Load the Llama model with f32 type
             let llama = model::Llama::<f32>::from_safetensors(&model_dir);
             let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
             chat(&llama, &tokenizer, 1.0);
         }
+
+        TensorDType::Float16 => {
+            // Load the Llama model with f16 type
+            let llama = model::Llama::<f16>::from_safetensors(&model_dir);
+            let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
+            chat(&llama, &tokenizer, f16::from_f32(1.0));
+        }
+
+        TensorDType::BFloat16 => {
+            // Load the Llama model with bf`6` type
+            let llama = model::Llama::<bf16>::from_safetensors(&model_dir);
+            let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
+            chat(&llama, &tokenizer, bf16::from_f32(1.0));
+        }
     };
 }
 
-fn chat<T: num_traits::Float + Default + Copy + num_traits::FromPrimitive + std::iter::Sum>(
+fn chat<T: Default + Copy + Sum + Float + FromPrimitive + FromLeBytes>(
     llama: &model::Llama<T>,
     tokenizer: &Tokenizer,
     temperature: T,
@@ -58,7 +69,7 @@ fn chat<T: num_traits::Float + Default + Copy + num_traits::FromPrimitive + std:
 
     loop {
         // Get user input
-        print!("User: ");
+        print!("User: \n");
         io::stdout().flush().unwrap();
         let mut user_input = String::new();
         io::stdin().read_line(&mut user_input).unwrap();
@@ -75,7 +86,7 @@ fn chat<T: num_traits::Float + Default + Copy + num_traits::FromPrimitive + std:
 
         // Format the input using Jinja-like template for the model
         let conversation_input: String =
-            messages.iter().map(|msg| msg.format()).collect::<String>() + "<|im_start|>assistant";
+            messages.iter().map(|msg| msg.format()).collect::<String>() + "<|im_start|>assistant\n";
 
         let binding = tokenizer.encode(conversation_input, true).unwrap();
         let input_ids = binding.get_ids();
@@ -83,6 +94,8 @@ fn chat<T: num_traits::Float + Default + Copy + num_traits::FromPrimitive + std:
         // Stream the model's response
         print!("Assistant: ");
         io::stdout().flush().unwrap();
+
+        let mut generated_tokens = vec![];
 
         let response_tokens = llama.streaming_generate(
             input_ids,
@@ -93,17 +106,27 @@ fn chat<T: num_traits::Float + Default + Copy + num_traits::FromPrimitive + std:
             &mut kvcache,
         );
         for token in response_tokens {
-            let word = tokenizer.decode(&[token], true).unwrap() + " ";
-            print!("{}", word);
+            generated_tokens.push(token);
+
+            // Decode the generated tokens so far
+            let partial_response = tokenizer
+                .decode(&generated_tokens, true)
+                .unwrap()
+                .trim()
+                .to_string();
+
+            // Clear the current line and print the partial response
+            print!("\rAssistant: {}", partial_response);
             io::stdout().flush().unwrap();
         }
 
         println!();
 
         // Append assistant message to conversation history
+        let response_text = tokenizer.decode(&generated_tokens, true).unwrap();
         messages.push(Message {
             role: "assistant".to_string(),
-            content: "".to_string(), // We'll update this after generating the response
+            content: response_text,
         });
     }
 }
